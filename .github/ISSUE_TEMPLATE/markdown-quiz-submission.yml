@@ -1,0 +1,23 @@
+name: Markdown Quiz Submission
+description: Submit your completed Markdown Skills Quiz to the KLIS-CS mother repository for independent automatic grading.
+title: "[Markdown Quiz Submission] Markdown Foundations"
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Skills Quiz 0 — Markdown Foundations
+
+        The mother repository independently re-grades your public `markdown-skills-quiz` repository.
+        You do **not** enter your score manually.
+
+        Required repository name: `markdown-skills-quiz`
+
+  - type: checkboxes
+    id: completion
+    attributes:
+      label: Submission Check
+      options:
+        - label: My `markdown-skills-quiz` repository is Public so the KLIS-CS mother grader can inspect it.
+          required: true
+        - label: I completed my answers in `markdown-quiz.md` and committed them to `main`.
+          required: true

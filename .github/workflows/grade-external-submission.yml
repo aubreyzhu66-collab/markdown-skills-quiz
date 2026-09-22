@@ -1,0 +1,206 @@
+name: Markdown Skills Quiz — Mother Repository Grader
+
+on:
+  issues:
+    types: [opened, edited, reopened]
+  issue_comment:
+    types: [created, edited]
+
+permissions:
+  contents: write
+  issues: write
+
+jobs:
+  grade:
+    if: >-
+      ${{
+        github.repository == 'KLIS-CS/GitHub-Markdown-Skills-Quiz' &&
+        !github.event.issue.pull_request &&
+        (
+          startsWith(github.event.issue.title, '[Markdown Quiz Submission]') ||
+          contains(github.event.issue.body, '### Practice Repository URL')
+        )
+      }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout mother grader
+        uses: actions/checkout@v4
+
+      - name: Grade student Markdown quiz
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { gradeMarkdown } = require('./.github/scripts/grade-markdown');
+            const { owner, repo } = context.repo;
+            const issue = context.payload.issue;
+            const issueNumber = issue.number;
+            const marker = '<!-- klis-markdown-mother-score -->';
+            const teacherAccounts = new Set(['hbycwyh2008']);
+
+            const section = label => {
+              const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+              const re = new RegExp('###\\s*' + escaped + '\\s*\\n+([^\\n]+)', 'i');
+              const value = (issue.body || '').match(re)?.[1]?.trim() || '';
+              return value === '_No response_' ? '' : value;
+            };
+
+            const issueAuthor = issue.user.login;
+            const submittedUsername = section('GitHub Username').replace(/^@/, '').trim();
+            const student = teacherAccounts.has(issueAuthor.toLowerCase()) && submittedUsername
+              ? submittedUsername
+              : issueAuthor;
+
+            const expectedRepo = 'markdown-skills-quiz';
+            const repositoryUrl = 'https://github.com/' + student + '/' + expectedRepo;
+
+            if (!section('Practice Repository URL')) {
+              const autoDetected = [
+                issue.body || '',
+                '',
+                '### Practice Repository URL',
+                repositoryUrl,
+                '',
+                '### GitHub Username',
+                student
+              ].join('\n');
+              await github.rest.issues.update({
+                owner, repo, issue_number: issueNumber, body: autoDetected
+              });
+            }
+
+            let meta = null;
+            let source = '';
+            let repositoryProblem = '';
+
+            try {
+              meta = (await github.rest.repos.get({ owner: student, repo: expectedRepo })).data;
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              repositoryProblem = 'Repository not found or not publicly accessible.';
+            }
+
+            if (meta) {
+              if (meta.private) {
+                repositoryProblem = 'Repository is Private. Change it to Public before submitting.';
+              } else if (meta.owner?.login?.toLowerCase() !== student.toLowerCase()) {
+                repositoryProblem = 'Repository owner does not match the student account.';
+              } else {
+                try {
+                  const file = await github.rest.repos.getContent({
+                    owner: student, repo: expectedRepo, path: 'markdown-quiz.md', ref: 'main'
+                  });
+                  if (Array.isArray(file.data) || !file.data.content) {
+                    repositoryProblem = 'markdown-quiz.md was not found on main.';
+                  } else {
+                    source = Buffer.from(file.data.content, file.data.encoding).toString('utf8');
+                  }
+                } catch (error) {
+                  if (error.status === 404) repositoryProblem = 'markdown-quiz.md was not found on main.';
+                  else throw error;
+                }
+              }
+            }
+
+            const markersValid = source.includes('<!-- QUIZ-START -->') && source.includes('<!-- QUIZ-END -->');
+            if (source && !markersValid) repositoryProblem = 'QUIZ-START / QUIZ-END markers are missing.';
+
+            const result = source && markersValid
+              ? gradeMarkdown(source)
+              : { score: 0, checks: [] };
+
+            const rows = result.checks.length
+              ? result.checks.map(check =>
+                  '| ' + (check.earned === check.max ? '✅' : '⬜') + ' ' + check.label +
+                  ' | ' + check.earned + '/' + check.max + ' | ' + check.detail + ' |'
+                ).join('\n')
+              : '| ⬜ Repository evidence | 0/100 | ' + (repositoryProblem || 'Quiz source unavailable.') + ' |';
+
+            const status = result.score === 100
+              ? '✅ **MASTERED — all Markdown skills passed.**'
+              : '🟡 **IN PROGRESS — fix the missing evidence in the student repository, then re-grade.**';
+
+            const body = [
+              marker,
+              '# Markdown Skills Quiz — Mother Score',
+              '',
+              '**Student:** @' + student + '  ',
+              '**Practice repository:** ' + repositoryUrl + '  ',
+              '**Score:** **' + result.score + '/100**',
+              '',
+              '| Skill | Score | Feedback |',
+              '|---|---:|---|',
+              rows,
+              '',
+              status,
+              '',
+              '> This score is independently calculated by the KLIS-CS mother repository from the student repository. No self-reported score is used.',
+              '',
+              '**Re-grade:** after changing `markdown-quiz.md`, add a new comment to this same Submission Issue.'
+            ].join('\n');
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner, repo, issue_number: issueNumber, per_page: 100
+            });
+            const existing = comments.find(c => c.user?.type === 'Bot' && c.body?.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner, repo, comment_id: existing.id, body
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: issueNumber, body
+              });
+            }
+
+            try {
+              const gradeBranch = 'grades';
+              try {
+                await github.rest.git.getRef({ owner, repo, ref: 'heads/' + gradeBranch });
+              } catch (error) {
+                if (error.status !== 404) throw error;
+                const mainRef = await github.rest.git.getRef({ owner, repo, ref: 'heads/main' });
+                await github.rest.git.createRef({
+                  owner, repo,
+                  ref: 'refs/heads/' + gradeBranch,
+                  sha: mainRef.data.object.sha
+                });
+              }
+
+              const gradePath = '.markdown-quiz-grades/' + student.toLowerCase() + '.json';
+              const gradeData = {
+                version: 1,
+                checkpoint: 'Skills Quiz 0',
+                student: student.toLowerCase(),
+                repository: repositoryUrl,
+                score: result.score,
+                mastered: result.score === 100,
+                submissionIssue: 'https://github.com/' + owner + '/' + repo + '/issues/' + issueNumber,
+                updatedAt: new Date().toISOString()
+              };
+
+              let sha;
+              try {
+                const current = await github.rest.repos.getContent({
+                  owner, repo, path: gradePath, ref: gradeBranch
+                });
+                if (!Array.isArray(current.data)) sha = current.data.sha;
+              } catch (error) {
+                if (error.status !== 404) throw error;
+              }
+
+              await github.rest.repos.createOrUpdateFileContents({
+                owner, repo, path: gradePath, branch: gradeBranch,
+                message: 'Publish Markdown Quiz score for ' + student,
+                content: Buffer.from(JSON.stringify(gradeData, null, 2) + '\n').toString('base64'),
+                ...(sha ? { sha } : {})
+              });
+            } catch (error) {
+              core.warning('Score comment was published, but machine-readable grade record could not be updated: ' + error.message);
+            }
+
+            await core.summary
+              .addHeading('Markdown Skills Quiz: ' + result.score + '/100')
+              .addRaw('Student: @' + student + '\n')
+              .write();
